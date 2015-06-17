@@ -9,13 +9,24 @@ maintainer: Łukasz Szpakowski
 description: Haskell compiler based on GHC for Letin virtual machine.
 author: Łukasz Szpakowski
 data-dir: .
- 
+
+library
+    build-depends: QuickCheck -any, base -any, ghc >=7.6.1
+    exposed-modules: GHCLetin.Ir.Id GHCLetin.Ir.Syn GHCLetin.Ir.Type
+                     GHCLetin.Letin.Type
+    exposed: True
+    buildable: True
+    cpp-options: -DTEST=1
+    hs-source-dirs: src
+
 executable GHCLetin
     build-depends: QuickCheck -any, base -any, ghc >=7.6.1
     main-is: Main.hs
     buildable: True
     hs-source-dirs: src
- 
+    other-modules: GHCLetin.Ir.Syn GHCLetin.Ir.Type GHCLetin.Ir.Id
+                   GHCLetin.Letin.Type
+
 test-suite test-GHCLetin
     build-depends: QuickCheck -any, base -any, ghc >=7.6.1
     type: exitcode-stdio-1.0
