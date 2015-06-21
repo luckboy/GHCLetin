@@ -4,14 +4,51 @@
 --
 
 module GHCLetin.Ir.Id (
+  NodeId(..),
   LocalVarId(..),
-  GlobalVarId(..)
+  GlobalVarId(..),
+  FunName(..)
 ) where
 
+import Data.Array
+import FastString
+import Unique
 import qualified Var as GHC
+import GHCLetin.Ir.Type
+import GHCLetin.Letin.Type
+
+data NodeId =
+    NodeId {
+      ni_i :: Int,
+      ni_valueType :: ValueType
+    }
+
+instance Uniquable NodeId where
+  getUnique = getUnique . ni_i
 
 data LocalVarId =
-    LocalVarId Int (Maybe GHC.Id)
+    LocalVarId {
+      lvi_nodeId :: NodeId,
+      lvi_var :: GHC.Var
+    }
+
+instance Uniquable LocalVarId where
+  getUnique = getUnique . lvi_nodeId
 
 data GlobalVarId =
-    GlobalVarId GHC.Id
+    GlobalVarId {
+      gvi_fs :: FastString,
+      gvi_funType :: FunType,
+      gvi_var :: GHC.Var
+    }
+
+instance Uniquable GlobalVarId where
+  getUnique = getUnique . gvi_fs
+
+data FunName =
+    FunName {
+      fn_fs :: FastString
+    }
+
+instance Uniquable FunName where
+  getUnique = getUnique . fn_fs

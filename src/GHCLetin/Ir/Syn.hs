@@ -8,12 +8,15 @@ module GHCLetin.Ir.Syn (
   ArgExpr(..),
   LetExpr(..),
   FunBody(..),
+  LocalVarBind(..),
+  FunBodyResult(..),
   Bind(..),
   DataConInst(..),
   FunInst(..)
 ) where
 
 import Data.Int
+import FastString
 import GHCLetin.Ir.Id
 import GHCLetin.Ir.Type
 import GHCLetin.Letin.Type
@@ -21,62 +24,72 @@ import GHCLetin.Letin.Type
 data Literal =
     Int Int64
   | Float Double
+  | String FastString
 
 data ArgExpr =
     Lit Literal
-  | Arg LocalVarId
-  | Lvar LocalVarId
+  | Arg Int LocalVarId
+  | Lvar Int LocalVarId
   | Gvar GlobalVarId
-  | Fun GlobalVarId [ValueType]
-  | FunClosureVar LocalVarId
   | Unbox ArgExpr
-  | LetExpr LocalVarId LetExpr
+  | LetExpr NodeId LetExpr
   | ArgIf ArgExpr ArgExpr ArgExpr
 
 data LetExpr =
-    Box ArgExpr
-  | LamClosureVar Int LocalVarId
+    LetLvar Int LocalVarId
+  | IntBox ArgExpr
+  | FloatBox ArgExpr
   | FunApp ArgExpr ArgExpr
-  | InstFunApp ArgExpr [ArgExpr]
-  | FunExpr FunExpr
-  | ArgTuple [ArgExpr]
+  | InstFunApp GlobalVarId [ValueType] [ArgExpr]
+  | LetFunApp FunBody
+  | LamFun [LocalVarId] FunBody
+  | CaseFunApp [(Int32, (LocalVarId, [LocalVarId], FunBody))] (Maybe (LocalVarId, [LocalVarId], FunBody))
+  | ArgArray [ArgExpr]
   | ArgExpr ArgExpr
   | LetIf ArgExpr LetExpr LetExpr
 
 data FunBody =
-    Let [(LocalVarId, LetExpr)] FunBody
-  | ClosureLet [(LocalVarId, ArgExpr)] FunBody
-  | Ret LetExpr
-  | Retry [ArgExpr]
-  | CaseRet LetExpr
-  | CaseRetry LocalVarId LetExpr
+    Let [LocalVarBind] FunBodyResult
 
-data FunExpr =
-    LetFun FunBody
-  | LamFun [LocalVarId] FunBody
-  | CaseFun [(Int32, (LocalVarId, [LocalVarId], FunBody))] (Maybe (LocalVarId, [LocalVarId], FunBody))
+data LocalVarBind =
+    LvarBind LocalVarId LetExpr
+  | ClosureVarBind LocalVarId ArgExpr
+
+data FunBodyResult =
+    Ret LetExpr
+  | Retry [ArgExpr]
+  | TailRecCaseRet LetExpr
+  | TailRecCaseRetry NodeId LetExpr
 
 data Bind =
     DataConBind {
       b_id :: GlobalVarId,
-      b_funType :: FunType,
       b_dataConInsts :: [DataConInst]
+    }
+  | DataFieldBind {
+      b_id :: GlobalVarId,
+      b_dataFieldInsts :: [DataFieldInst]
     }
   | FunBind {
       b_id :: GlobalVarId,
       b_argIds :: [LocalVarId],
-      b_funType :: FunType,
       b_body :: FunBody,
       b_funInsts :: [FunInst]
     }
 
 data DataConInst =
     DataConInst {
-      dci_paramTypes :: [ValueType]
+      dci_typeParamTypes :: [ValueType]
+    }
+
+data DataFieldInst =
+    DataFieldInst {
+      dfi_typeParamIndex :: Int,
+      dfi_typeParamType :: ValueType
     }
 
 data FunInst =
     FunInst {
-      fi_paramTypes :: [ValueType],
+      fi_typeParamTypes :: [ValueType],
       fi_body :: FunBody
     }
