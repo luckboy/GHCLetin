@@ -7,6 +7,7 @@ module GHCLetin.Ir.Syn (
   Literal(..),
   ArgExpr(..),
   LetExpr(..),
+  AltCon(..),
   FunBody(..),
   LocalVarBind(..),
   FunBodyResult(..),
@@ -37,19 +38,25 @@ data ArgExpr =
 
 data LetExpr =
     LetLvar Int LocalVarId
+  | LocalVarFun GlobalVarId [ValueType] LocalVarId
   | IntBox ArgExpr
   | FloatBox ArgExpr
   | FunApp ArgExpr ArgExpr
   | InstFunApp GlobalVarId [ValueType] [ArgExpr]
   | LetFunApp FunBody
   | LamFun [LocalVarId] FunBody
-  | CaseFunApp [(Int32, (LocalVarId, [LocalVarId], FunBody))] (Maybe (LocalVarId, [LocalVarId], FunBody))
+  | CaseFunApp ArgExpr [(AltCon, (LocalVarId, [LocalVarId], FunBody))]
   | ArgArray [ArgExpr]
   | ArgExpr ArgExpr
   | LetIf ArgExpr LetExpr LetExpr
 
+data AltCon =
+    DataAltCon Int32
+  | LitAltCon Literal
+  | DefaultAltCon
+
 data FunBody =
-    Let [LocalVarBind] FunBodyResult
+    Let [LocalVarBind] FunBodyResult Bool
 
 data LocalVarBind =
     LvarBind LocalVarId LetExpr
@@ -58,8 +65,7 @@ data LocalVarBind =
 data FunBodyResult =
     Ret LetExpr
   | Retry [ArgExpr]
-  | TailRecCaseRet LetExpr
-  | TailRecCaseRetry NodeId LetExpr
+  | FunBodyResultIf ArgExpr FunBodyResult FunBodyResult
 
 data Bind =
     DataConBind {
