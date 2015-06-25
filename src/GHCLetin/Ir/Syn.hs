@@ -56,7 +56,7 @@ data AltCon =
   | DefaultAltCon
 
 data FunBody =
-    Let [LocalVarBind] FunBodyResult Bool
+    Let [LocalVarBind] FunBodyResult
 
 data LocalVarBind =
     LvarBind LocalVarId LetExpr

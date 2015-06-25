@@ -42,8 +42,8 @@ coreExprToIrFunBody funNames tyPaTypes expr = undefined
 
 data IrEnv =
     IrEnv {
-      ie_origFunId :: GlobalVarId,
       ie_funNames :: UniqSet FunName,
+      ie_origFunId :: GlobalVarId,
       ie_typeParams :: UniqFM Int,
       ie_typeParamTypes :: Array Int ValueType,
       ie_localVarInfos :: UniqFM IrLocalVarInfo,
@@ -61,11 +61,11 @@ data IrLocalVarInfo =
       ilvi_recursive :: Bool
     }
 
-initIrEnv :: GlobalVarId -> UniqSet FunName -> UniqFM Int -> Array Int ValueType -> Maybe GHC.Var -> IrEnv
-initIrEnv origFunId funNames tyParams tyPaTypes funVarMaybe =
+initIrEnv :: UniqSet FunName -> GlobalVarId -> UniqFM Int -> Array Int ValueType -> Maybe GHC.Var -> IrEnv
+initIrEnv funNames origFunId tyParams tyPaTypes funVarMaybe =
   IrEnv {
-    ie_origFunId = origFunId,
     ie_funNames = funNames,
+    ie_origFunId = origFunId,
     ie_typeParams = tyParams,
     ie_typeParamTypes = tyPaTypes,
     ie_localVarInfos = emptyUFM,
@@ -94,15 +94,56 @@ setFunVarMaybe env varMaybe = env { ie_funVarMaybe = varMaybe }
 setFunFlag :: IrEnv -> Bool -> IrEnv
 setFunFlag env funFlag = env { ie_funFlag = funFlag }
 
-coreExprToIrFunBody' :: IrEnv -> GHC.CoreExpr -> (Int, UniqSet LocalVarId) -> (FunBody, ValueType, (Int, UniqSet LocalVarId))
-coreExprToIrFunBody' env expr (i, closureVarIds) =
+coreExprToIrFunBody' :: IrEnv -> GHC.CoreExpr -> Maybe ValueType -> (Int, UniqSet LocalVarId) -> (FunBody, ValueType, (Int, UniqSet LocalVarId))
+coreExprToIrFunBody' env expr valueTypeMaybe (i, closureVarIds) =
   let (binds, retExpr) = splitCoreLets expr
       (localVarInfos, i') = coreBindsToIrLocalVarInfos env binds i
       lvarIds = map (ilvi_localVarId . snd) localVarInfos
-  in  undefined
+      env' = setLvarIds (addLocalVarInfos env localVarInfos) lvarIds
+      (funBodyRes', valueType, pair') = coreExprToIrFunBodyResult' env' retExpr valueTypeMaybe (i', emptyUniqSet)
+      (i'', closureVarIds') = pair'
+      bindExprs = coreBindsToCoreExprs binds
+      bindTuples = map (\((v, lvi), (_, e)) -> (v, lvi, e)) (zip localVarInfos bindExprs)
+      (binds', (i''', closureVarIds2)) = foldr (
+          \(v, lvi, e) (bs, p) ->
+            let id = ilvi_localVarId lvi
+                vt = ni_valueType (lvi_nodeId id)
+                env'' = setFunVarMaybe env' (Just v)
+                (b, p''') =
+                  if isJust (lookupUniqSet closureVarIds' id) then
+                    let (e', vt2, p' @ (j', cvids')) =
+                          if not (ilvi_recursive lvi) then
+                            coreExprToIrLetExpr' env'' e p
+                          else
+                            coreLamToIrLetExpr' env'' e p
+                        (e'', j'') =
+                          case e' of
+                            LamFun [] _ ->
+                              let aa = LetExpr (NodeId (j' + 1) ValueTypeRef) (ArgArray [])
+                              in  (FunApp (LetExpr (NodeId j' vt2) e') aa, j' + 2)
+                            _           -> (e', j')
+                        (e''', j''') = boxOrUnboxIrLetExpr e' vt vt2 j'
+                    in  (LvarBind id e''', (j''', cvids'))
+                  else
+                    let (e', vt2, p' @ (j', cvids')) =
+                          if not (ilvi_recursive lvi) then
+                            coreExprToIrArgExpr' env'' e p
+                          else
+                            coreLamToIrArgExpr' env'' e p
+                        (e'', j'') =
+                          case e' of
+                            LetExpr _ (LamFun [] _) ->
+                              let aa = LetExpr (NodeId (j' + 1) ValueTypeRef) (ArgArray [])
+                              in  (LetExpr (NodeId j' vt2) (FunApp e' aa), j' + 2)
+                            _                       -> (e', j')
+                        (e''', j''') = boxOrUnboxIrArgExpr e'' vt vt2 j''
+                    in  (ClosureVarBind id e''', (j''', cvids'))
+            in  (b : bs, p''')
+       ) ([], pair') bindTuples
+  in  (Let binds' funBodyRes', valueType, (i''', closureVarIds `unionUniqSets` closureVarIds2))
 
-coreExprToIrFunBodyResult' :: IrEnv -> GHC.CoreExpr -> (Int, UniqSet LocalVarId) -> (FunBodyResult, ValueType, (Int, UniqSet LocalVarId))
-coreExprToIrFunBodyResult' env expr pair = undefined
+coreExprToIrFunBodyResult' :: IrEnv -> GHC.CoreExpr -> Maybe ValueType -> (Int, UniqSet LocalVarId) -> (FunBodyResult, ValueType, (Int, UniqSet LocalVarId))
+coreExprToIrFunBodyResult' env expr valueTypeMaybe pair = undefined
 
 coreExprToIrArgExpr' :: IrEnv -> GHC.CoreExpr -> (Int, UniqSet LocalVarId) -> (ArgExpr, ValueType, (Int, UniqSet LocalVarId))
 coreExprToIrArgExpr' env expr pair =
@@ -112,7 +153,7 @@ coreExprToIrArgExpr' env expr pair =
         GHC.Lit l    -> literalToIrArgExpr' l pair
         GHC.Cast e _ -> coreExprToIrArgExpr' env' e pair
         GHC.Tick _ e -> coreExprToIrArgExpr' env' e pair
-        _         ->
+        _            ->
           case coreCaseToIrArgSimpleCase'_maybe env' expr pair of
             Just t  -> t
             Nothing ->
@@ -140,11 +181,16 @@ varToIrArgExpr' env var (pair @ (i, closureVarIds)) =
 
 literalToIrArgExpr' :: GHC.Literal -> (Int, UniqSet LocalVarId) -> (ArgExpr, ValueType, (Int, UniqSet LocalVarId))
 literalToIrArgExpr' lit pair =
-  let (lit', valueType) = literalToIrLiteralWithValueType lit
+  let (lit', valueType) = literalToIrLiteralWithLetinValueType lit
   in  (Lit lit', valueType, pair)
 
 coreCaseToIrArgSimpleCase'_maybe :: IrEnv -> GHC.CoreExpr -> (Int, UniqSet LocalVarId) -> Maybe (ArgExpr, ValueType, (Int, UniqSet LocalVarId))
 coreCaseToIrArgSimpleCase'_maybe env expr pair = undefined
+
+coreLamToIrArgExpr' :: IrEnv -> GHC.CoreExpr -> (Int, UniqSet LocalVarId) -> (ArgExpr, ValueType, (Int, UniqSet LocalVarId))
+coreLamToIrArgExpr' env expr pair =
+  case coreLamToIrLetExpr' env expr pair of
+    (e, vt, p @ (i', cvids)) -> (LetExpr (NodeId i' vt) e, vt, (i' + 1, cvids))
 
 coreExprToIrLetExpr' :: IrEnv -> GHC.CoreExpr -> (Int, UniqSet LocalVarId) -> (LetExpr, ValueType, (Int, UniqSet LocalVarId))
 coreExprToIrLetExpr' env expr pair =
@@ -160,8 +206,9 @@ coreExprToIrLetExpr' env expr pair =
             Just t  -> t
             Nothing ->
               case expr of
-                GHC.Lam _ _ -> coreLamToIrExpr' env expr pair
-                _           -> coreLetToIrExpr' env' expr pair
+                GHC.Lam _ _      -> coreLamToIrLetExpr' env expr pair
+                GHC.Case _ _ _ _ -> coreCaseToIrLetExpr' env' expr pair
+                _                -> coreLetToIrLetExpr' env' expr pair
 
 varToIrLetExpr' :: IrEnv -> GHC.Var -> (Int, UniqSet LocalVarId) -> (LetExpr, ValueType, (Int, UniqSet LocalVarId))
 varToIrLetExpr' env var pair =
@@ -258,23 +305,23 @@ coreAppToIrLetExpr' env expr pair =
 coreCaseToIrLetSimpleCase'_maybe :: IrEnv -> GHC.CoreExpr -> (Int, UniqSet LocalVarId) -> Maybe (LetExpr, ValueType, (Int, UniqSet LocalVarId))
 coreCaseToIrLetSimpleCase'_maybe env expr pair = undefined
 
-coreLetToIrExpr':: IrEnv -> GHC.CoreExpr -> (Int, UniqSet LocalVarId) -> (LetExpr, ValueType, (Int, UniqSet LocalVarId))
-coreLetToIrExpr' env expr pair =
+coreLetToIrLetExpr' :: IrEnv -> GHC.CoreExpr -> (Int, UniqSet LocalVarId) -> (LetExpr, ValueType, (Int, UniqSet LocalVarId))
+coreLetToIrLetExpr' env expr pair =
   let env' = setFunVarMaybe (setArgIds (incClosureIndex env) []) Nothing
-      (funBody, valueType, pair') = coreExprToIrFunBody' env' expr pair
+      (funBody, valueType, pair') = coreExprToIrFunBody' env' expr Nothing pair
   in  (LetFunApp funBody, valueType, pair')
 
-coreLamToIrExpr' :: IrEnv -> GHC.CoreExpr -> (Int, UniqSet LocalVarId) -> (LetExpr, ValueType, (Int, UniqSet LocalVarId))
-coreLamToIrExpr' env expr (i, closureVarIds) =
+coreLamToIrLetExpr' :: IrEnv -> GHC.CoreExpr -> (Int, UniqSet LocalVarId) -> (LetExpr, ValueType, (Int, UniqSet LocalVarId))
+coreLamToIrLetExpr' env expr (i, closureVarIds) =
   let (args, _, bodyExpr) = splitCoreLams expr
       (localVarInfos, i') = varsToIrLocalVarInfos env args i
       args' = map (ilvi_localVarId . snd) localVarInfos
       env' = setArgIds (addLocalVarInfos (incClosureIndex env) localVarInfos) args'
-      (funBody, _, pair') = coreExprToIrFunBody' env' expr (i', closureVarIds)
+      (funBody, _, pair') = coreExprToIrFunBody' env' expr Nothing (i', closureVarIds)
   in  (LamFun args' funBody, ValueTypeRef, pair')
 
-coreCaseToIrExpr' :: IrEnv -> GHC.CoreExpr -> (Int, UniqSet LocalVarId) -> (LetExpr, ValueType, (Int, UniqSet LocalVarId))
-coreCaseToIrExpr' env expr pair =
+coreCaseToIrLetExpr' :: IrEnv -> GHC.CoreExpr -> (Int, UniqSet LocalVarId) -> (LetExpr, ValueType, (Int, UniqSet LocalVarId))
+coreCaseToIrLetExpr' env expr pair =
   case expr of
     GHC.Case e v t as ->
       let (argExpr, _, (i', closureVarIds')) = coreExprToIrArgExpr' (setFunFlag env False) e pair
@@ -293,7 +340,7 @@ coreCaseToIrExpr' env expr pair =
                     (lvis, j') = varsToIrLocalVarInfos env aas j
                     aas' = map (ilvi_localVarId . snd) lvis
                     env' = setFunVarMaybe (setArgIds (addLocalVarInfos (incClosureIndex env) lvis) aas') Nothing
-                    (fb', _, p') = coreExprToIrFunBody' env' ae (j', cvids)
+                    (fb', _, p') = coreExprToIrFunBody' env' ae (Just valueType) (j', cvids)
                 in  ((ac', (wildId, aas', fb')) : aps, p')
             ) ([], (i'', closureVarIds')) as
       in  (CaseFunApp argExpr alts', valueType, pair')
@@ -326,11 +373,26 @@ addVarIrLocalVarInfo env var (infos, i) =
       id = LocalVarId (NodeId i (varLetinValueType tyParams tyPaTypes var)) var
   in  ((var, IrLocalVarInfo id (ie_closureIndex env) False) : infos, i + 1)
 
-literalToIrLiteral :: GHC.Literal -> Literal
-literalToIrLiteral = fst . literalToIrLiteralWithValueType
+coreBindsToCoreExprs :: [GHC.CoreBind] -> [(GHC.Var, GHC.CoreExpr)]
+coreBindsToCoreExprs binds = concatMap coreBindToCoreExprs binds
 
-literalToIrLiteralWithValueType :: GHC.Literal -> (Literal, ValueType)
-literalToIrLiteralWithValueType lit =
+coreBindToCoreExprs :: GHC.CoreBind -> [(GHC.Var, GHC.CoreExpr)]
+coreBindToCoreExprs bind =
+  case bind of
+    GHC.NonRec v e -> [(v, e)]
+    GHC.Rec ps     -> ps
+
+boxOrUnboxIrLetExpr :: LetExpr -> ValueType -> ValueType -> Int -> (LetExpr, Int)
+boxOrUnboxIrLetExpr expr expectValueType actualValueType = undefined
+
+boxOrUnboxIrArgExpr :: ArgExpr -> ValueType -> ValueType -> Int -> (ArgExpr, Int)
+boxOrUnboxIrArgExpr expr expectValueType actualValueType = undefined
+
+literalToIrLiteral :: GHC.Literal -> Literal
+literalToIrLiteral = fst . literalToIrLiteralWithLetinValueType
+
+literalToIrLiteralWithLetinValueType :: GHC.Literal -> (Literal, ValueType)
+literalToIrLiteralWithLetinValueType lit =
   case lit of
     GHC.MachChar x      -> (Int (fromInteger (toInteger (ord x))), ValueTypeInt)
     GHC.MachStr x       -> (String x, ValueTypeRef)
