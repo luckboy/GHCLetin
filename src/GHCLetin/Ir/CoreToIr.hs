@@ -111,7 +111,7 @@ coreExprToIrFunBody' env expr valueTypeMaybe (i, closureVarIds) =
                 env'' = setFunVarMaybe env' (Just v)
                 (b, p''') =
                   if isJust (lookupUniqSet closureVarIds' id) then
-                    let (e', vt2, p' @ (j', cvids')) =
+                    let (e', vt2, (j', cvids')) =
                           if not (ilvi_recursive lvi) then
                             coreExprToIrLetExpr' env'' e p
                           else
@@ -125,7 +125,7 @@ coreExprToIrFunBody' env expr valueTypeMaybe (i, closureVarIds) =
                         (e''', j''') = boxOrUnboxIrLetExpr e' vt vt2 j'
                     in  (LvarBind id e''', (j''', cvids'))
                   else
-                    let (e', vt2, p' @ (j', cvids')) =
+                    let (e', vt2, (j', cvids')) =
                           if not (ilvi_recursive lvi) then
                             coreExprToIrArgExpr' env'' e p
                           else
