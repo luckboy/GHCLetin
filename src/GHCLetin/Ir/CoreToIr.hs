@@ -7,7 +7,6 @@ module GHCLetin.Ir.CoreToIr (
   coreToIr
 ) where
 
-import Control.Monad
 import Data.Array
 import Data.Char
 import Data.Int
@@ -21,6 +20,7 @@ import qualified Literal as GHC
 import qualified Name as GHC
 import qualified TyCon as GHC
 import qualified Type as GHC
+import qualified TysPrim as GHC
 import qualified Var as GHC
 import qualified Var
 import GHCLetin.Ir.Id
@@ -303,7 +303,7 @@ coreAppToIrLetExpr' env expr pair =
         Just (v, vts) ->
           let tyParams = ie_typeParams env
               funTyPaTypes = listArray (0, length vts - 1) vts
-              funType = instFunType funTyPaTypes (varIrFunType tyParams v)
+              funType = instFunType funTyPaTypes (varIrFunType v)
               argTypes = take (length args) (ift_argTypes funType)
               retType =
                 if length args == length (ift_argTypes funType) then
@@ -312,15 +312,16 @@ coreAppToIrLetExpr' env expr pair =
                   ValueTypeRef
               funId = varToGlobalVarId (ie_typeParams env) v
               (args', pair') = foldr (
-                  \a (as, p) ->
+                  \(a, at) (as, p) ->
                     case coreExprToIrArgExpr' (setFunFlag env False) a p of
                       (a', vt, p') ->
                         let a'' =
-                              case vt of
-                                ValueTypeRef -> a'
-                                _            -> Unbox a'
+                              case (at, vt) of
+                                (ValueTypeRef, ValueTypeRef) -> a'
+                                (_, ValueTypeRef)            -> Unbox a'
+                                _                            -> a'
                         in  (a'' : as, p')
-                ) ([], pair) args
+                ) ([], pair) (zip args argTypes)
           in  (InstFunApp funId (elems funTyPaTypes) args', retType, pair')
         Nothing       ->
           let (fun' : args', (i', closureVarIds')) = foldr (
@@ -487,23 +488,73 @@ literalToIrLiteralWithLetinValueType lit =
     GHC.MachLabel _ _ _ -> (Int 0, ValueTypeInt)
     GHC.LitInteger x _  -> (Int (fromInteger x), ValueTypeInt)
 
-typeToIrFunType :: UniqFM Int -> GHC.Type -> FunType
-typeToIrFunType tyParams typ = undefined
+tyConValueTypes :: UniqFM ValueType
+tyConValueTypes =
+  listToUFM [
+    (GHC.charPrimTyCon, ValueTypeInt),
+    (GHC.intPrimTyCon, ValueTypeInt),
+    (GHC.int32PrimTyCon, ValueTypeInt),
+    (GHC.int64PrimTyCon, ValueTypeInt),
+    (GHC.wordPrimTyCon, ValueTypeInt),
+    (GHC.word32PrimTyCon, ValueTypeInt),
+    (GHC.word64PrimTyCon, ValueTypeInt),
+    (GHC.addrPrimTyCon, ValueTypeInt),
+    (GHC.floatPrimTyCon, ValueTypeFloat),
+    (GHC.doublePrimTyCon, ValueTypeFloat)]
+
+typeToIrFunType :: GHC.Type -> FunType
+typeToIrFunType typ = typeToIrFunType' typ emptyUFM (0, [])
+
+typeToIrFunType' :: GHC.Type -> UniqFM Int -> (Int, [ArgType]) -> FunType
+typeToIrFunType' typ tyParams (tyParamCount, argTypes) =
+  let (tyVars, typ') = GHC.splitForAllTys typ
+      tyParamCount' = tyParamCount + length tyVars
+      tyParams' = addListToUFM tyParams (zip tyVars [tyParamCount .. tyParamCount'])
+  in  case GHC.splitFunTy_maybe typ' of
+        Just (at, rt) ->
+          let argTypes' = (typeToIrArgType tyParams' at) : argTypes
+          in  typeToIrFunType' rt tyParams' (tyParamCount', argTypes')
+        Nothing       ->
+          FunType {
+            ft_typeParamCount = tyParamCount',
+            ft_argTypes = reverse argTypes,
+            ft_retType = (typeToIrArgType tyParams' typ')
+          }
+
+typeToIrArgType :: UniqFM Int -> GHC.Type -> ArgType
+typeToIrArgType tyParams typ =
+  case GHC.getTyVar_maybe typ of
+    Just tv -> tyVarIrArgType tyParams tv
+    Nothing ->
+      case GHC.tyConAppTyCon_maybe typ of
+        Just tc ->
+          case lookupUFM tyConValueTypes tc of
+            Just vt -> ValueType vt
+            Nothing ->
+              if GHC.isEnumerationTyCon tc then
+                 ValueType ValueTypeInt
+              else
+                case GHC.tyConDataCons tc of
+                  [dc] ->
+                    case GHC.dataConSig dc of
+                      (_, _, [t], _) -> typeToIrArgType tyParams t
+                  _    -> ValueType ValueTypeRef
+        Nothing -> ValueType ValueTypeRef
 
 typeToLetinValueType :: UniqFM Int -> Array Int ValueType -> GHC.Type -> ValueType
-typeToLetinValueType tyParams tyPaTypes typ = undefined
+typeToLetinValueType tyParams tyPaTypes typ = instArgType tyPaTypes (typeToIrArgType tyParams typ)
 
 tyVarIrArgType :: UniqFM Int -> GHC.TyVar -> ArgType
-tyVarIrArgType tyParams typ = undefined
+tyVarIrArgType tyParams tyVar = maybe (ValueType ValueTypeRef) TypeParam (lookupUFM tyParams tyVar)
 
-tyVarLetinValueType:: UniqFM Int -> Array Int ValueType -> GHC.TyVar -> ValueType
+tyVarLetinValueType :: UniqFM Int -> Array Int ValueType -> GHC.TyVar -> ValueType
 tyVarLetinValueType tyParams tyPaTypes tyVar = instArgType tyPaTypes (tyVarIrArgType tyParams tyVar)
 
-varIrFunType :: UniqFM Int -> GHC.Var -> FunType
-varIrFunType tyParams var = undefined
+varIrFunType :: GHC.Var -> FunType
+varIrFunType var = typeToIrFunType (GHC.varType var)
 
 varIrArgType :: UniqFM Int -> GHC.Var -> ArgType
-varIrArgType tyParams var = undefined
+varIrArgType tyParams var = typeToIrArgType tyParams (GHC.varType var)
 
 varIrRetType :: UniqFM Int -> GHC.Var -> RetType
 varIrRetType = varIrArgType
@@ -517,7 +568,7 @@ isInstFunVar funNames var argCount valueTypes = undefined
 varToGlobalVarId :: UniqFM Int -> GHC.Var -> GlobalVarId
 varToGlobalVarId tyParams var =
   let fs = GHC.occNameFS (GHC.nameOccName (Var.varName var))
-  in  GlobalVarId fs (varIrFunType tyParams var) var
+  in  GlobalVarId fs (varIrFunType var) var
 
 splitCoreLams :: GHC.CoreExpr -> ([GHC.Var], [GHC.TyVar], GHC.CoreExpr)
 splitCoreLams = splitCoreLams' ([], [])

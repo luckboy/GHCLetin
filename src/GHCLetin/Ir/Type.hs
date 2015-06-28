@@ -17,7 +17,7 @@ import Data.Array
 import GHCLetin.Letin.Type
 
 data ArgType =
-    ValueType ValueType (Maybe ValueType)
+    ValueType ValueType
   | TypeParam Int
 
 type RetType = ArgType
@@ -45,8 +45,8 @@ instFunType tyPaTypes funType =
 instArgType :: Array Int ValueType -> ArgType -> ValueType
 instArgType tyPaTypes argType =
   case argType of
-    ValueType vt _ -> vt
-    TypeParam i    ->
+    ValueType vt -> vt
+    TypeParam i  ->
       let (j, k) = bounds tyPaTypes
       in  if i >= j && i <= k then tyPaTypes ! i else ValueTypeRef
 
