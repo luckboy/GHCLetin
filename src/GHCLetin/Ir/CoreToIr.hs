@@ -4,13 +4,15 @@
 --
 
 module GHCLetin.Ir.CoreToIr (
-  coreToIr
+  coreToIr,
+  irBindsToIrFunNames
 ) where
 
 import Data.Array
 import Data.Char
 import Data.Int
 import Data.Maybe
+import Data.Graph
 import UniqFM
 import UniqSet
 import qualified DataCon as GHC
@@ -22,6 +24,7 @@ import qualified TyCon as GHC
 import qualified Type as GHC
 import qualified TysPrim as GHC
 import qualified Var as GHC
+import qualified VarSet as GHC
 import qualified Var
 import GHCLetin.Ir.Id
 import GHCLetin.Ir.Syn
@@ -31,14 +34,90 @@ import GHCLetin.Letin.Type
 coreToIr :: UniqSet FunName -> [GHC.TyCon] -> GHC.CoreProgram -> IO [Bind]
 coreToIr funNames tyCons prog = undefined
 
+irBindsToIrFunNames :: [Bind] -> UniqSet FunName
+irBindsToIrFunNames = foldr (unionUniqSets . irBindToIrFunNames) emptyUniqSet
+
+irBindToIrFunNames :: Bind -> UniqSet FunName
+irBindToIrFunNames bind =
+  case bind of
+    DataConBind id dcis   ->
+      let funType = gvi_funType id
+          tyParamCount = ft_typeParamCount funType
+          tyParamTypes = listArray (0, tyParamCount - 1) (replicate tyParamCount ValueTypeRef)
+          tyPaTypeArrays = tyParamTypes : (map (\tpts -> listArray (0, length tpts - 1) tpts) (map dci_typeParamTypes dcis))
+      in  mkInstFunNames id tyPaTypeArrays (length (ft_argTypes funType))
+    DataFieldBind id dfis ->
+      let funType = gvi_funType id
+          tyParamCount = ft_typeParamCount funType
+          tyParamTypes = listArray (0, tyParamCount - 1) (replicate tyParamCount ValueTypeRef)
+          tyPaTypeArrays = tyParamTypes : (map (\tpt -> listArray (0, 0) [tpt]) (map dfi_typeParamType dfis))
+      in  mkInstFunNames id tyPaTypeArrays 1
+    FunBind id aids b _ fis ->
+      let funType = gvi_funType id
+          tyParamCount = ft_typeParamCount funType
+          tyParamTypes = listArray (0, tyParamCount - 1) (replicate tyParamCount ValueTypeRef)
+          tyPaTypeArrays = tyParamTypes : (map (\tpts -> listArray (0, length tpts - 1) tpts) (map fi_typeParamTypes fis))
+      in  mkInstFunNames id tyPaTypeArrays (length aids)
+
+mkInstFunNames :: GlobalVarId -> [Array Int ValueType] -> Int -> UniqSet FunName
+mkInstFunNames id tyPaTypeArrays argCount =
+  mkUniqSet (map (\tpts -> mkInstFunName id tpts argCount) tyPaTypeArrays)
+
 tyConToIrBinds :: GHC.TyCon -> [Bind]
 tyConToIrBinds tyCons = undefined
 
-coreBindToIrBind :: UniqSet FunName -> GHC.CoreBind -> Bind
-coreBindToIrBind funNames bind = undefined
+canInstFun :: FunType -> FunBody -> Bool
+canInstFun funType funBody =
+  let tyParamCount = ft_typeParamCount funType
+  in  tyParamCount >= 1 && tyParamCount <= 2 && irFunBodyCount funBody <= 256
 
-coreExprToIrFunBody :: UniqSet FunName -> Array Int ValueType -> GHC.CoreExpr -> FunBody
-coreExprToIrFunBody funNames tyPaTypes expr = undefined
+coreBindToIrBinds :: UniqSet FunName -> GHC.CoreBind -> [Bind]
+coreBindToIrBinds funNames bind =
+  case bind of
+    GHC.NonRec v e ->
+      let (args, tyVars, bodyExpr) = splitCoreLams e
+          funId = varToGlobalVarId v
+          funType = gvi_funType funId
+          tyParams = listToUFM (zip tyVars [0 .. (length tyVars - 1)])
+          tyPaTypes = listArray (0, ft_typeParamCount funType) (replicate (ft_typeParamCount funType) ValueTypeRef)
+          (localVarInfos, i) = varsToIrLocalVarInfos' tyParams tyPaTypes 0 args 0
+          argIds = map (ilvi_localVarId . snd) localVarInfos
+          (funBody, closureVarIds) = coreExprToIrFunBody funNames funId tyPaTypes localVarInfos argIds bodyExpr i
+          funInsts =
+            if canInstFun funType funBody then
+              let tyParamCount = ft_typeParamCount funType
+                  tyPaTypeVs = variations tyParamCount [ValueTypeInt, ValueTypeFloat, ValueTypeRef]
+              in  concatMap (
+                      \tpts ->
+                        if tpts /= replicate tyParamCount ValueTypeRef then
+                          let tpts' = listArray (0, length tpts - 1) tpts
+                              (ilvis, j) = varsToIrLocalVarInfos' tyParams tpts' 0 args 0
+                              iaids = map (ilvi_localVarId . snd) ilvis
+                              (fb, cvids) = coreExprToIrFunBody funNames funId tpts' ilvis iaids bodyExpr j
+                          in  [FunInst tpts iaids fb cvids]
+                        else
+                          []
+                    ) tyPaTypeVs
+            else
+              []
+      in  [FunBind {
+            b_id = funId,
+            b_argIds = argIds,
+            b_body = funBody,
+            b_funInsts = funInsts,
+            b_closureVarIds = closureVarIds
+          }]
+    GHC.Rec ps     ->
+      concatMap (coreBindToIrBinds funNames) (map (uncurry GHC.NonRec) ps)
+
+coreExprToIrFunBody :: UniqSet FunName -> GlobalVarId -> Array Int ValueType -> [(GHC.Var, IrLocalVarInfo)] -> [LocalVarId] -> GHC.CoreExpr -> Int -> (FunBody, UniqSet LocalVarId)
+coreExprToIrFunBody funNames funId tyPaTypes localVarInfos argIds expr i =
+  let funPairMaybe = Just (gvi_var funId, (length argIds))
+      unusedWildVars = coreExprUnusedWildVars expr
+      env = initIrEnv funNames funId emptyUFM tyPaTypes funPairMaybe unusedWildVars
+      env' = setArgIds (addLocalVarInfos (incClosureIndex env) localVarInfos) argIds
+  in  case coreExprToIrFunBody' env' expr Nothing (i, emptyUniqSet) of
+        (fb, _, (_, cvids)) -> (fb, cvids)
 
 data IrEnv =
     IrEnv {
@@ -51,7 +130,8 @@ data IrEnv =
       ie_lvarIds :: UniqSet LocalVarId,
       ie_closureIndex :: Int,
       ie_funPairMaybe :: Maybe (GHC.Var, Int),
-      ie_funFlag :: Bool
+      ie_funFlag :: Bool,
+      ie_unusedWildVars :: GHC.VarSet
     }
 
 data IrLocalVarInfo =
@@ -61,8 +141,8 @@ data IrLocalVarInfo =
       ilvi_recursive :: Bool
     }
 
-initIrEnv :: UniqSet FunName -> GlobalVarId -> UniqFM Int -> Array Int ValueType -> Maybe (GHC.Var, Int) -> IrEnv
-initIrEnv funNames origFunId tyParams tyPaTypes funPairMaybe =
+initIrEnv :: UniqSet FunName -> GlobalVarId -> UniqFM Int -> Array Int ValueType -> Maybe (GHC.Var, Int) -> GHC.VarSet -> IrEnv
+initIrEnv funNames origFunId tyParams tyPaTypes funPairMaybe unusedWildVars =
   IrEnv {
     ie_funNames = funNames,
     ie_origFunId = origFunId,
@@ -73,7 +153,8 @@ initIrEnv funNames origFunId tyParams tyPaTypes funPairMaybe =
     ie_lvarIds = emptyUniqSet,
     ie_closureIndex = 0,
     ie_funPairMaybe = funPairMaybe,
-    ie_funFlag = False
+    ie_funFlag = False,
+    ie_unusedWildVars = unusedWildVars
   }
 
 addLocalVarInfos :: IrEnv -> [(GHC.Var, IrLocalVarInfo)] -> IrEnv
@@ -204,7 +285,7 @@ varToIrArgExpr' env var (pair @ (i, closureVarIds)) =
         case varToIrLocalVarFunOrFunApp' env var info pair of
           (e, vt, (i', cvids)) -> (LetExpr (NodeId i' vt) e, vt, (i' + 1, cvids))
     Nothing   ->
-      (Gvar (varToGlobalVarId (ie_typeParams env) var), ValueTypeRef, pair)
+      (Gvar (varToGlobalVarId var), ValueTypeRef, pair)
 
 literalToIrArgExpr' :: GHC.Literal -> (Int, UniqSet LocalVarId) -> (ArgExpr, ValueType, (Int, UniqSet LocalVarId))
 literalToIrArgExpr' lit pair =
@@ -310,7 +391,7 @@ coreAppToIrLetExpr' env expr pair =
                   ift_retType funType
                 else
                   ValueTypeRef
-              funId = varToGlobalVarId (ie_typeParams env) v
+              funId = varToGlobalVarId v
               (args', pair') = foldr (
                   \(a, at) (as, p) ->
                     case coreExprToIrArgExpr' (setFunFlag env False) a p of
@@ -361,10 +442,10 @@ coreLamToIrLetExpr' :: IrEnv -> GHC.CoreExpr -> (Int, UniqSet LocalVarId) -> (Le
 coreLamToIrLetExpr' env expr (i, closureVarIds) =
   let (args, _, bodyExpr) = splitCoreLams expr
       (localVarInfos, i') = varsToIrLocalVarInfos env args i
-      args' = map (ilvi_localVarId . snd) localVarInfos
-      env' = setArgIds (addLocalVarInfos (incClosureIndex env) localVarInfos) args'
+      argIds = map (ilvi_localVarId . snd) localVarInfos
+      env' = setArgIds (addLocalVarInfos (incClosureIndex env) localVarInfos) argIds
       (funBody, _, pair') = coreExprToIrFunBody' env' expr Nothing (i', closureVarIds)
-  in  (LamFun args' funBody, ValueTypeRef, pair')
+  in  (LamFun argIds funBody, ValueTypeRef, pair')
 
 coreCaseToIrLetExpr' :: IrEnv -> GHC.CoreExpr -> (Int, UniqSet LocalVarId) -> (LetExpr, ValueType, (Int, UniqSet LocalVarId))
 coreCaseToIrLetExpr' env expr pair =
@@ -380,7 +461,18 @@ coreCaseToIrLetExpr' env expr pair =
               \(ac, aas, ae) (aps, (j, cvids)) ->
                 let ac' =
                       case ac of
-                        GHC.DataAlt dc -> DataAltCon (fromInteger (toInteger (GHC.dataConTag dc - 1)))
+                        GHC.DataAlt dc ->
+                          let b =
+                                case GHC.dataConSig dc of
+                                  (_, _, [t], _) -> length as == 1
+                                  _              -> False
+                          in  if not b then
+                                if not (GHC.isEnumerationTyCon (GHC.dataConTyCon dc)) then
+                                  DataAltCon (fromInteger (toInteger (GHC.dataConTag dc - 1)))
+                                else
+                                  EnumAltCon (fromInteger (toInteger (GHC.dataConTag dc - 1)))
+                              else
+                                BoxAltCon
                         GHC.LitAlt l   -> LitAltCon (literalToIrLiteral l)
                         GHC.DEFAULT    -> DefaultAltCon
                     (lvis, j') = varsToIrLocalVarInfos env aas j
@@ -399,23 +491,26 @@ coreCaseToSimpleCase'_maybe f g env expr pair =
           tyPaTypes = ie_typeParamTypes env
           valueType = typeToLetinValueType tyParams tyPaTypes t
           case_maybe as h1 h2 =
-            case as of
-              [(_, [], ae1)]                            ->
-                Just (h1 ae1 Nothing pair)
-              [(_, [], ae1), (GHC.LitAlt l, [], ae2)]   ->
-                case l of
-                  GHC.MachChar '\0'  -> Just (h2 ae1 ae2 pair)
-                  GHC.MachNullAddr   -> Just (h2 ae1 ae2 pair)
-                  GHC.MachInt 0      -> Just (h2 ae1 ae2 pair)
-                  GHC.MachInt64 0    -> Just (h2 ae1 ae2 pair)
-                  GHC.MachWord 0     -> Just (h2 ae1 ae2 pair)
-                  GHC.MachWord64 0   -> Just (h2 ae1 ae2 pair)
-                  GHC.LitInteger 0 _ -> Just (h2 ae1 ae2 pair)
-                  _                  -> Nothing
-              [(_, [], ae1), (GHC.DataAlt dc, [], ae2)] ->
-                if GHC.dataConTag dc == 1 then Just (h2 ae1 ae2 pair) else Nothing
-              _                                         ->
-                Nothing
+            if isJust (GHC.lookupVarSet (ie_unusedWildVars env) v) then
+              case as of
+                [(_, [], ae1)]                            ->
+                  Just (h1 ae1 Nothing pair)
+                [(_, [], ae1), (GHC.LitAlt l, [], ae2)]   ->
+                  case l of
+                    GHC.MachChar '\0'  -> Just (h2 ae1 ae2 pair)
+                    GHC.MachNullAddr   -> Just (h2 ae1 ae2 pair)
+                    GHC.MachInt 0      -> Just (h2 ae1 ae2 pair)
+                    GHC.MachInt64 0    -> Just (h2 ae1 ae2 pair)
+                    GHC.MachWord 0     -> Just (h2 ae1 ae2 pair)
+                    GHC.MachWord64 0   -> Just (h2 ae1 ae2 pair)
+                    GHC.LitInteger 0 _ -> Just (h2 ae1 ae2 pair)
+                    _                  -> Nothing
+                [(_, [], ae1), (GHC.DataAlt dc, [], ae2)] ->
+                  if GHC.dataConTag dc == 1 then Just (h2 ae1 ae2 pair) else Nothing
+                _                                         ->
+                  Nothing
+            else
+              Nothing
           h altExpr1 altExpr2 pair =
             case coreExprToIrArgExpr' env expr pair of
               (e, vt, p) ->
@@ -449,11 +544,15 @@ varsToIrLocalVarInfos :: IrEnv -> [GHC.Var] -> Int -> ([(GHC.Var, IrLocalVarInfo
 varsToIrLocalVarInfos env vars i = foldr (addVarIrLocalVarInfo env) ([], i) vars
 
 addVarIrLocalVarInfo :: IrEnv -> GHC.Var -> ([(GHC.Var, IrLocalVarInfo)], Int) -> ([(GHC.Var, IrLocalVarInfo)], Int)
-addVarIrLocalVarInfo env var (infos, i) =
-  let tyParams = ie_typeParams env
-      tyPaTypes = ie_typeParamTypes env
-      id = LocalVarId (NodeId i (varLetinValueType tyParams tyPaTypes var)) var
-  in  ((var, IrLocalVarInfo id (ie_closureIndex env) False) : infos, i + 1)
+addVarIrLocalVarInfo env = addVarIrLocalVarInfo' (ie_typeParams env) (ie_typeParamTypes env) (ie_closureIndex env)
+
+varsToIrLocalVarInfos' :: UniqFM Int -> Array Int ValueType -> Int -> [GHC.Var] -> Int -> ([(GHC.Var, IrLocalVarInfo)], Int)
+varsToIrLocalVarInfos' tyParams tyPaTypes closureIdx vars i = foldr (addVarIrLocalVarInfo' tyParams tyPaTypes closureIdx) ([], i) vars
+
+addVarIrLocalVarInfo' :: UniqFM Int -> Array Int ValueType -> Int -> GHC.Var -> ([(GHC.Var, IrLocalVarInfo)], Int) -> ([(GHC.Var, IrLocalVarInfo)], Int)
+addVarIrLocalVarInfo' tyParams tyPaTypes closureIdx var (infos, i) =
+  let id = LocalVarId (NodeId i (varLetinValueType tyParams tyPaTypes var)) var
+  in  ((var, IrLocalVarInfo id closureIdx False) : infos, i + 1)
 
 coreBindsToCoreExprs :: [GHC.CoreBind] -> [(GHC.Var, GHC.CoreExpr)]
 coreBindsToCoreExprs binds = concatMap coreBindToCoreExprs binds
@@ -538,6 +637,7 @@ typeToIrArgType tyParams typ =
                   [dc] ->
                     case GHC.dataConSig dc of
                       (_, _, [t], _) -> typeToIrArgType tyParams t
+                      _              -> ValueType ValueTypeRef
                   _    -> ValueType ValueTypeRef
         Nothing -> ValueType ValueTypeRef
 
@@ -565,8 +665,8 @@ varLetinValueType tyParams tyPaTypes var = instArgType tyPaTypes (varIrArgType t
 isInstFunVar :: UniqSet FunName -> GHC.Var -> Int-> [ValueType] -> Bool
 isInstFunVar funNames var argCount valueTypes = undefined
 
-varToGlobalVarId :: UniqFM Int -> GHC.Var -> GlobalVarId
-varToGlobalVarId tyParams var =
+varToGlobalVarId :: GHC.Var -> GlobalVarId
+varToGlobalVarId var =
   let fs = GHC.occNameFS (GHC.nameOccName (Var.varName var))
   in  GlobalVarId fs (varIrFunType var) var
 
@@ -623,3 +723,124 @@ coreExprVar_maybe expr =
     GHC.Cast e _ -> coreExprVar_maybe e
     GHC.Tick _ e -> coreExprVar_maybe e
     _            -> Nothing
+
+topSortCoreBinds :: [GHC.CoreBind] -> [GHC.CoreBind]
+topSortCoreBinds binds =
+  let nodeTuples = concatMap coreBindToNodeTuples binds
+  in  flattenSCCs (stronglyConnComp nodeTuples)
+
+coreBindToNodeTuples :: GHC.CoreBind -> [(GHC.CoreBind, GHC.Var, [GHC.Var])]
+coreBindToNodeTuples bind =
+  case bind of
+    GHC.NonRec v e -> [(bind, v, coreExprFreeVars e)]
+    GHC.Rec ps     -> concatMap coreBindToNodeTuples (map (uncurry GHC.NonRec) ps)
+
+coreExprFreeVars :: GHC.CoreExpr -> [GHC.Var]
+coreExprFreeVars expr = GHC.varSetElems (GHC.mkVarSet (coreExprFreeVars' GHC.emptyVarSet expr []))
+
+coreExprFreeVars' :: GHC.VarSet -> GHC.CoreExpr -> [GHC.Var] -> [GHC.Var]
+coreExprFreeVars' bVars expr fVars =
+  case expr of
+    GHC.Var v         -> if not (isJust (GHC.lookupVarSet bVars v)) then v : fVars else fVars
+    GHC.Lit _         -> fVars
+    GHC.App f a       -> coreExprFreeVars' bVars f (coreExprFreeVars' bVars a fVars)
+    GHC.Lam a e       -> coreExprFreeVars' (addOneToUniqSet bVars a) e fVars
+    GHC.Let b e       ->
+      let (bVars'', fVars') =
+            case b of
+              GHC.NonRec bv be ->
+                let bVars' = GHC.extendVarSet bVars bv
+                in  (bVars', coreExprFreeVars' bVars' be fVars)
+              GHC.Rec ps       ->
+                let bVars' = GHC.extendVarSetList bVars (map fst ps)
+                in  (bVars', foldr (coreExprFreeVars' bVars') fVars (map snd ps))
+      in  coreExprFreeVars' bVars'' e fVars'
+    GHC.Case e v _ as ->
+      let fVars' = coreExprFreeVars' bVars e fVars
+      in  foldr (coreAltFreeVars' (GHC.extendVarSet bVars v)) fVars' as
+    GHC.Cast e _      -> coreExprFreeVars' bVars e fVars
+    GHC.Tick _ e      -> coreExprFreeVars' bVars e fVars
+    _                 -> fVars
+
+coreAltFreeVars' :: GHC.VarSet -> GHC.CoreAlt -> [GHC.Var] -> [GHC.Var]
+coreAltFreeVars' bVars alt fVars =
+  case alt of
+    (_, as, e) -> coreExprFreeVars' (GHC.extendVarSetList bVars as) e fVars
+
+coreExprUnusedWildVars :: GHC.CoreExpr -> GHC.VarSet
+coreExprUnusedWildVars expr = coreExprUnusedWildVars' expr GHC.emptyVarSet
+
+coreExprUnusedWildVars' :: GHC.CoreExpr -> GHC.VarSet -> GHC.VarSet
+coreExprUnusedWildVars' expr uwVars =
+  case expr of
+    GHC.Var v         -> GHC.delVarSet uwVars v
+    GHC.App f a       -> coreExprUnusedWildVars' f (coreExprUnusedWildVars' a uwVars)
+    GHC.Lam a e       -> coreExprUnusedWildVars' e uwVars
+    GHC.Let b e       ->
+      let uwVars' =
+            case b of
+              GHC.NonRec _ be -> coreExprUnusedWildVars' be uwVars
+              GHC.Rec ps      -> foldr coreExprUnusedWildVars' uwVars (map snd ps)
+      in  coreExprUnusedWildVars' e uwVars'
+    GHC.Case _ v _ as -> foldr coreAltUnusedWildVars' (GHC.extendVarSet uwVars v) as
+    GHC.Cast e _      -> coreExprUnusedWildVars' e uwVars
+    GHC.Tick _ e      -> coreExprUnusedWildVars' e uwVars
+    _                 -> uwVars
+
+coreAltUnusedWildVars' :: GHC.CoreAlt -> GHC.VarSet -> GHC.VarSet
+coreAltUnusedWildVars' alt uwVars =
+  case alt of
+    (_, _, e) -> coreExprUnusedWildVars' e uwVars
+
+irArgExprCount :: ArgExpr -> Int
+irArgExprCount expr =
+  case expr of
+    Unbox e       -> irArgExprCount e + 1
+    LetExpr _ e   -> irLetExprCount e + 1
+    ArgIf e e1 e2 -> irArgExprCount e + irArgExprCount e1 + irArgExprCount e2 + 1
+    _             -> 1
+
+irLetExprCount :: LetExpr -> Int
+irLetExprCount expr =
+  case expr of
+    IntBox e          -> irArgExprCount e + 1
+    FloatBox e        -> irArgExprCount e + 1
+    FunApp f a        -> irArgExprCount f + irArgExprCount a + 1
+    InstFunApp _ _ as -> foldr (\a s -> irArgExprCount a + s) 0 as + 1
+    LetFunApp fb      -> irFunBodyCount fb + 1
+    LamFun _ fb       -> irFunBodyCount fb + 1
+    CaseFunApp e as   -> foldr (\a s -> irAltCount a + s) 0 as + 1
+    ArgArray es       -> foldr (\e s -> irArgExprCount e + s) 0 es + 1
+    ArgExpr e         -> irArgExprCount e + 1
+    LetIf e e1 e2     -> irArgExprCount e + irLetExprCount e1 + irLetExprCount e2 + 1
+
+irAltCount :: (AltCon, (LocalVarId, [LocalVarId], FunBody)) -> Int
+irAltCount alt =
+  case alt of
+    (_, (_, _, fb)) -> irFunBodyCount fb
+
+irFunBodyCount :: FunBody -> Int
+irFunBodyCount funBody =
+  case funBody of
+    Let bs fbr ->
+      foldr (\b s -> irLocalVarBindCount b + s) 0 bs + irFunBodyResultCount fbr + 1
+
+irLocalVarBindCount :: LocalVarBind -> Int
+irLocalVarBindCount bind =
+  case bind of
+    LvarBind _ e       -> irLetExprCount e + 1
+    ClosureVarBind _ e -> irArgExprCount e + 1
+
+irFunBodyResultCount :: FunBodyResult -> Int
+irFunBodyResultCount funBodyResult =
+  case funBodyResult of
+    Ret e                   -> irLetExprCount e + 1
+    Retry as                -> foldr (\a s -> irArgExprCount a + s) 0 as + 1
+    FunBodyResultIf e r1 r2 -> irArgExprCount e + irFunBodyResultCount r1 + irFunBodyResultCount r2 + 1
+
+variations :: Int -> [a] -> [[a]]
+variations 0 _  = []
+variations 1 xs = map (: []) xs
+variations n xs =
+  let ys = variations (n - 1) xs
+  in  concatMap (\x -> map (x :) ys) xs

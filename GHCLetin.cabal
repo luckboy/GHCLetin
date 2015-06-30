@@ -11,7 +11,8 @@ author: Łukasz Szpakowski
 data-dir: .
  
 library
-    build-depends: QuickCheck -any, array -any, base -any, ghc >=7.6.1
+    build-depends: QuickCheck -any, array -any, base -any,
+                   containers -any, ghc >=7.6.1
     exposed-modules: GHCLetin.Ir.CoreToIr GHCLetin.Ir.Id
                      GHCLetin.Ir.Syn GHCLetin.Ir.Type GHCLetin.Letin.Type
     exposed: True
@@ -20,7 +21,8 @@ library
     hs-source-dirs: src
  
 executable GHCLetin
-    build-depends: QuickCheck -any, array -any, base -any, ghc >=7.6.1
+    build-depends: QuickCheck -any, array -any, base -any,
+                   containers -any, ghc >=7.6.1
     main-is: Main.hs
     buildable: True
     hs-source-dirs: src
@@ -28,7 +30,8 @@ executable GHCLetin
                    GHCLetin.Ir.Type GHCLetin.Ir.Id GHCLetin.Letin.Type
  
 test-suite test-GHCLetin
-    build-depends: QuickCheck -any, array -any, base -any, ghc >=7.6.1
+    build-depends: QuickCheck -any, array -any, base -any,
+                   containers -any, ghc >=7.6.1
     type: exitcode-stdio-1.0
     main-is: Main.hs
     buildable: True

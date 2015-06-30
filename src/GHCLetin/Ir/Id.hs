@@ -7,7 +7,9 @@ module GHCLetin.Ir.Id (
   NodeId(..),
   LocalVarId(..),
   GlobalVarId(..),
-  FunName(..)
+  FunName(..),
+  mkFunName,
+  mkInstFunName
 ) where
 
 import Data.Array
@@ -52,3 +54,18 @@ data FunName =
 
 instance Uniquable FunName where
   getUnique = getUnique . fn_fs
+
+valueTypeToChar :: ValueType -> Char
+valueTypeToChar ValueTypeInt   = 'i'
+valueTypeToChar ValueTypeFloat = 'f'
+valueTypeToChar ValueTypeRef   = 'r'
+
+mkFunName :: GlobalVarId -> Int -> FunName
+mkFunName id argCount = FunName (mkFastString ("$f" ++ (show argCount) ++ "$" ++ (unpackFS (gvi_fs id))))
+
+mkInstFunName :: GlobalVarId -> Array Int ValueType -> Int -> FunName
+mkInstFunName id tyPaTypes argCount =
+  let len  = snd (bounds tyPaTypes) - fst (bounds tyPaTypes)
+      cs = map valueTypeToChar (elems tyPaTypes)
+      s = unpackFS (gvi_fs id)
+  in  FunName (mkFastString ("$if" ++ (show len) ++ cs ++ (show argCount) ++ "$" ++ s))

@@ -13,11 +13,13 @@ module GHCLetin.Ir.Syn (
   FunBodyResult(..),
   Bind(..),
   DataConInst(..),
+  DataFieldInst(..),
   FunInst(..)
 ) where
 
 import Data.Int
 import FastString
+import UniqSet
 import GHCLetin.Ir.Id
 import GHCLetin.Ir.Type
 import GHCLetin.Letin.Type
@@ -52,6 +54,8 @@ data LetExpr =
 
 data AltCon =
     DataAltCon Int32
+  | EnumAltCon Int32
+  | BoxAltCon
   | LitAltCon Literal
   | DefaultAltCon
 
@@ -80,6 +84,7 @@ data Bind =
       b_id :: GlobalVarId,
       b_argIds :: [LocalVarId],
       b_body :: FunBody,
+      b_closureVarIds :: UniqSet LocalVarId,
       b_funInsts :: [FunInst]
     }
 
@@ -90,12 +95,13 @@ data DataConInst =
 
 data DataFieldInst =
     DataFieldInst {
-      dfi_typeParamIndex :: Int,
       dfi_typeParamType :: ValueType
     }
 
 data FunInst =
     FunInst {
       fi_typeParamTypes :: [ValueType],
-      fi_body :: FunBody
+      fi_argIds :: [LocalVarId],
+      fi_body :: FunBody,
+      fi_closureVarIds :: UniqSet LocalVarId
     }

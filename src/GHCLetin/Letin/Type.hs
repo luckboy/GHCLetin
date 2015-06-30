@@ -11,7 +11,7 @@ module GHCLetin.Letin.Type (
 data ValueType =
     ValueTypeInt
   | ValueTypeFloat
-  | ValueTypeRef
+  | ValueTypeRef deriving (Eq)
 
 data ObjectType =
     ObjectTypeIarray8
