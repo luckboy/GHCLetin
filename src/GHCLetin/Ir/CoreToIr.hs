@@ -17,6 +17,7 @@ import UniqFM
 import UniqSet
 import qualified DataCon as GHC
 import qualified DynFlags as GHC
+import qualified Class as GHC
 import qualified CoreSyn as GHC
 import qualified Literal as GHC
 import qualified Name as GHC
@@ -32,7 +33,17 @@ import GHCLetin.Ir.Type
 import GHCLetin.Letin.Type
 
 coreToIr :: UniqSet FunName -> [GHC.TyCon] -> GHC.CoreProgram -> IO [Bind]
-coreToIr funNames tyCons prog = undefined
+coreToIr funNames tyCons prog =
+  let topSortedBinds = topSortCoreBinds prog
+      tyConBinds = concatMap tyConToIrBinds tyCons
+      funNames = irBindsToIrFunNames tyConBinds
+      (progBinds, _) = foldr (
+          \b (bs, fns) ->
+            let bs2 = coreBindToIrBinds fns b
+                fns2 = irBindsToIrFunNames bs2
+            in  (bs2 ++ bs, fns2 `unionUniqSets` fns)
+        ) ([], funNames) (reverse topSortedBinds)
+  in  return (tyConBinds ++ progBinds)
 
 irBindsToIrFunNames :: [Bind] -> UniqSet FunName
 irBindsToIrFunNames = foldr (unionUniqSets . irBindToIrFunNames) emptyUniqSet
@@ -40,19 +51,19 @@ irBindsToIrFunNames = foldr (unionUniqSets . irBindToIrFunNames) emptyUniqSet
 irBindToIrFunNames :: Bind -> UniqSet FunName
 irBindToIrFunNames bind =
   case bind of
-    DataConBind id dcis   ->
+    DataConBind id dcis           ->
       let funType = gvi_funType id
           tyParamCount = ft_typeParamCount funType
           tyParamTypes = listArray (0, tyParamCount - 1) (replicate tyParamCount ValueTypeRef)
           tyPaTypeArrays = tyParamTypes : (map (\tpts -> listArray (0, length tpts - 1) tpts) (map dci_typeParamTypes dcis))
       in  mkInstFunNames id tyPaTypeArrays (length (ft_argTypes funType))
-    DataFieldBind id dfis ->
+    DataFieldBind id _ dfis       ->
       let funType = gvi_funType id
           tyParamCount = ft_typeParamCount funType
           tyParamTypes = listArray (0, tyParamCount - 1) (replicate tyParamCount ValueTypeRef)
-          tyPaTypeArrays = tyParamTypes : (map (\tpt -> listArray (0, 0) [tpt]) (map dfi_typeParamType dfis))
+          tyPaTypeArrays = tyParamTypes : (map (\tpts -> listArray (0, 0) tpts) (map dfi_typeParamTypes dfis))
       in  mkInstFunNames id tyPaTypeArrays 1
-    FunBind id aids b _ fis ->
+    FunBind id (Fun aids _ _) fis ->
       let funType = gvi_funType id
           tyParamCount = ft_typeParamCount funType
           tyParamTypes = listArray (0, tyParamCount - 1) (replicate tyParamCount ValueTypeRef)
@@ -64,12 +75,38 @@ mkInstFunNames id tyPaTypeArrays argCount =
   mkUniqSet (map (\tpts -> mkInstFunName id tpts argCount) tyPaTypeArrays)
 
 tyConToIrBinds :: GHC.TyCon -> [Bind]
-tyConToIrBinds tyCons = undefined
+tyConToIrBinds tyCon =
+  let dataConBinds = map dataConToIrBind (GHC.tyConDataCons tyCon)
+      classBinds = maybe [] classToIrBinds (GHC.tyConClass_maybe tyCon)
+  in  dataConBinds ++ classBinds
 
-canInstFun :: FunType -> FunBody -> Bool
-canInstFun funType funBody =
+dataConToIrBind :: GHC.DataCon -> Bind
+dataConToIrBind dataCon =
+  let funId = varToGlobalVarId (GHC.dataConWrapId dataCon)
+      funType = gvi_funType funId
+      tyParamCount = ft_typeParamCount funType
+      tyPaTypeVs = variations tyParamCount [ValueTypeInt, ValueTypeFloat, ValueTypeRef]
+      dataConInsts = if canInstIrDataCon funType then map DataConInst tyPaTypeVs else []
+  in  DataConBind {
+        b_id = funId,
+        b_dataConInsts = dataConInsts
+      }
+
+classToIrBinds :: GHC.Class -> [Bind]
+classToIrBinds clazz =
+  map (
+      \(i, v) ->
+        let fid = varToGlobalVarId v
+            ft = gvi_funType fid
+            tpc = ft_typeParamCount ft
+            tptvs = variations tpc [ValueTypeInt, ValueTypeFloat, ValueTypeRef]
+        in  DataFieldBind fid i (if canInstIrDataCon ft then map DataFieldInst tptvs else [])
+    ) (zip [0 .. (length (GHC.classMethods clazz) - 1)] (GHC.classMethods clazz))
+
+canInstIrDataCon :: FunType -> Bool
+canInstIrDataCon funType =
   let tyParamCount = ft_typeParamCount funType
-  in  tyParamCount >= 1 && tyParamCount <= 2 && irFunBodyCount funBody <= 256
+  in  tyParamCount >= 1 && tyParamCount <= 2
 
 coreBindToIrBinds :: UniqSet FunName -> GHC.CoreBind -> [Bind]
 coreBindToIrBinds funNames bind =
@@ -84,7 +121,7 @@ coreBindToIrBinds funNames bind =
           argIds = map (ilvi_localVarId . snd) localVarInfos
           (funBody, closureVarIds) = coreExprToIrFunBody funNames funId tyPaTypes localVarInfos argIds bodyExpr i
           funInsts =
-            if canInstFun funType funBody then
+            if canInstIrFun funType funBody then
               let tyParamCount = ft_typeParamCount funType
                   tyPaTypeVs = variations tyParamCount [ValueTypeInt, ValueTypeFloat, ValueTypeRef]
               in  concatMap (
@@ -94,7 +131,7 @@ coreBindToIrBinds funNames bind =
                               (ilvis, j) = varsToIrLocalVarInfos' tyParams tpts' 0 args 0
                               iaids = map (ilvi_localVarId . snd) ilvis
                               (fb, cvids) = coreExprToIrFunBody funNames funId tpts' ilvis iaids bodyExpr j
-                          in  [FunInst tpts iaids fb cvids]
+                          in  [FunInst tpts (Fun iaids fb cvids)]
                         else
                           []
                     ) tyPaTypeVs
@@ -102,13 +139,20 @@ coreBindToIrBinds funNames bind =
               []
       in  [FunBind {
             b_id = funId,
-            b_argIds = argIds,
-            b_body = funBody,
-            b_funInsts = funInsts,
-            b_closureVarIds = closureVarIds
+            b_fun = Fun {
+              f_argIds = argIds,
+              f_body = funBody,
+              f_closureVarIds = closureVarIds
+            },
+            b_funInsts = funInsts
           }]
     GHC.Rec ps     ->
       concatMap (coreBindToIrBinds funNames) (map (uncurry GHC.NonRec) ps)
+
+canInstIrFun :: FunType -> FunBody -> Bool
+canInstIrFun funType funBody =
+  let tyParamCount = ft_typeParamCount funType
+  in  tyParamCount >= 1 && tyParamCount <= 2 && irFunBodyCount funBody <= 256
 
 coreExprToIrFunBody :: UniqSet FunName -> GlobalVarId -> Array Int ValueType -> [(GHC.Var, IrLocalVarInfo)] -> [LocalVarId] -> GHC.CoreExpr -> Int -> (FunBody, UniqSet LocalVarId)
 coreExprToIrFunBody funNames funId tyPaTypes localVarInfos argIds expr i =
@@ -167,7 +211,7 @@ setLvarIds :: IrEnv -> [LocalVarId] -> IrEnv
 setLvarIds env ids = env { ie_lvarIds =  mkUniqSet ids }
 
 incClosureIndex :: IrEnv -> IrEnv
-incClosureIndex env = env { ie_closureIndex = (ie_closureIndex env) + 1 }
+incClosureIndex env = env { ie_closureIndex = ie_closureIndex env + 1 }
 
 setFunPairMaybe :: IrEnv ->  Maybe (GHC.Var, Int) -> IrEnv
 setFunPairMaybe env pairMaybe = env { ie_funPairMaybe = pairMaybe }
@@ -564,10 +608,20 @@ coreBindToCoreExprs bind =
     GHC.Rec ps     -> ps
 
 boxOrUnboxIrLetExpr :: LetExpr -> ValueType -> ValueType -> Int -> (LetExpr, Int)
-boxOrUnboxIrLetExpr expr expectValueType actualValueType = undefined
+boxOrUnboxIrLetExpr expr expectValueType actualValueType i =
+  case (expectValueType, actualValueType) of
+    (ValueTypeRef, ValueTypeInt)   -> (IntBox (LetExpr (NodeId i ValueTypeInt) expr), i + 1)
+    (ValueTypeRef, ValueTypeFloat) -> (FloatBox (LetExpr (NodeId i ValueTypeFloat) expr), i + 1)
+    (ValueTypeRef, ValueTypeRef)   -> (expr, i)
+    (_, ValueTypeRef)              -> (ArgExpr (Unbox (LetExpr (NodeId i ValueTypeRef) expr)), i + 1)
 
 boxOrUnboxIrArgExpr :: ArgExpr -> ValueType -> ValueType -> Int -> (ArgExpr, Int)
-boxOrUnboxIrArgExpr expr expectValueType actualValueType = undefined
+boxOrUnboxIrArgExpr expr expectValueType actualValueType i =
+  case (expectValueType, actualValueType) of
+    (ValueTypeRef, ValueTypeInt)   -> (LetExpr (NodeId i ValueTypeRef) (IntBox expr), i + 1)
+    (ValueTypeRef, ValueTypeFloat) -> (LetExpr (NodeId i ValueTypeRef) (FloatBox expr), i + 1)
+    (ValueTypeRef, ValueTypeRef)   -> (expr, i)
+    (_, ValueTypeRef)              -> (Unbox expr, i)
 
 literalToIrLiteral :: GHC.Literal -> Literal
 literalToIrLiteral = fst . literalToIrLiteralWithLetinValueType
@@ -663,7 +717,11 @@ varLetinValueType :: UniqFM Int -> Array Int ValueType -> GHC.Var -> ValueType
 varLetinValueType tyParams tyPaTypes var = instArgType tyPaTypes (varIrArgType tyParams var)
 
 isInstFunVar :: UniqSet FunName -> GHC.Var -> Int-> [ValueType] -> Bool
-isInstFunVar funNames var argCount valueTypes = undefined
+isInstFunVar funNames var argCount valueTypes =
+  let id = varToGlobalVarId var
+      tyPaTypes = listArray (0, length valueTypes - 1) valueTypes
+      funName = mkInstFunName id tyPaTypes argCount
+  in  isJust (lookupUFM funNames funName)
 
 varToGlobalVarId :: GHC.Var -> GlobalVarId
 varToGlobalVarId var =

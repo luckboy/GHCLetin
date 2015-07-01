@@ -8,7 +8,6 @@ module GHCLetin.Ir.Id (
   LocalVarId(..),
   GlobalVarId(..),
   FunName(..),
-  mkFunName,
   mkInstFunName
 ) where
 
@@ -48,9 +47,7 @@ instance Uniquable GlobalVarId where
   getUnique = getUnique . gvi_fs
 
 data FunName =
-    FunName {
-      fn_fs :: FastString
-    }
+    FunName { fn_fs :: FastString }
 
 instance Uniquable FunName where
   getUnique = getUnique . fn_fs
@@ -59,9 +56,6 @@ valueTypeToChar :: ValueType -> Char
 valueTypeToChar ValueTypeInt   = 'i'
 valueTypeToChar ValueTypeFloat = 'f'
 valueTypeToChar ValueTypeRef   = 'r'
-
-mkFunName :: GlobalVarId -> Int -> FunName
-mkFunName id argCount = FunName (mkFastString ("$f" ++ (show argCount) ++ "$" ++ (unpackFS (gvi_fs id))))
 
 mkInstFunName :: GlobalVarId -> Array Int ValueType -> Int -> FunName
 mkInstFunName id tyPaTypes argCount =

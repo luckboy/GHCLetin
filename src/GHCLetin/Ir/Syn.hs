@@ -12,6 +12,7 @@ module GHCLetin.Ir.Syn (
   LocalVarBind(..),
   FunBodyResult(..),
   Bind(..),
+  Fun(..),
   DataConInst(..),
   DataFieldInst(..),
   FunInst(..)
@@ -78,30 +79,30 @@ data Bind =
     }
   | DataFieldBind {
       b_id :: GlobalVarId,
+      b_dataFieldIndex :: Int,
       b_dataFieldInsts :: [DataFieldInst]
     }
   | FunBind {
       b_id :: GlobalVarId,
-      b_argIds :: [LocalVarId],
-      b_body :: FunBody,
-      b_closureVarIds :: UniqSet LocalVarId,
+      b_fun :: Fun,
       b_funInsts :: [FunInst]
     }
 
-data DataConInst =
-    DataConInst {
-      dci_typeParamTypes :: [ValueType]
+data Fun =
+    Fun {
+      f_argIds :: [LocalVarId],
+      f_body :: FunBody,
+      f_closureVarIds :: UniqSet LocalVarId
     }
 
+data DataConInst =
+    DataConInst { dci_typeParamTypes :: [ValueType] }
+
 data DataFieldInst =
-    DataFieldInst {
-      dfi_typeParamType :: ValueType
-    }
+    DataFieldInst { dfi_typeParamTypes :: [ValueType] }
 
 data FunInst =
     FunInst {
       fi_typeParamTypes :: [ValueType],
-      fi_argIds :: [LocalVarId],
-      fi_body :: FunBody,
-      fi_closureVarIds :: UniqSet LocalVarId
+      fi_fun :: Fun
     }
