@@ -614,6 +614,7 @@ boxOrUnboxIrLetExpr expr expectValueType actualValueType i =
     (ValueTypeRef, ValueTypeFloat) -> (FloatBox (LetExpr (NodeId i ValueTypeFloat) expr), i + 1)
     (ValueTypeRef, ValueTypeRef)   -> (expr, i)
     (_, ValueTypeRef)              -> (ArgExpr (Unbox (LetExpr (NodeId i ValueTypeRef) expr)), i + 1)
+    (_, _)                         -> (expr, i)
 
 boxOrUnboxIrArgExpr :: ArgExpr -> ValueType -> ValueType -> Int -> (ArgExpr, Int)
 boxOrUnboxIrArgExpr expr expectValueType actualValueType i =
@@ -622,6 +623,7 @@ boxOrUnboxIrArgExpr expr expectValueType actualValueType i =
     (ValueTypeRef, ValueTypeFloat) -> (LetExpr (NodeId i ValueTypeRef) (FloatBox expr), i + 1)
     (ValueTypeRef, ValueTypeRef)   -> (expr, i)
     (_, ValueTypeRef)              -> (Unbox expr, i)
+    (_, _)                         -> (expr, i)
 
 literalToIrLiteral :: GHC.Literal -> Literal
 literalToIrLiteral = fst . literalToIrLiteralWithLetinValueType
