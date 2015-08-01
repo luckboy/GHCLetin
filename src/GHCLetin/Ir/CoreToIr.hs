@@ -245,10 +245,10 @@ coreExprToIrFunBody' env expr valueTypeMaybe (i, closureVarIds) =
                         (e'', j'') =
                           case e' of
                             LamFun [] _ ->
-                              let aa = LetExpr (NodeId (j' + 1) ValueTypeRef) (ArgTuple [])
-                              in  (FunApp (LetExpr (NodeId j' vt2) e') aa, j' + 2)
+                              let ae = LetExpr (NodeId j' ValueTypeRef) (ArgTuple [])
+                              in  (FunApp (LetExpr (NodeId j' vt2) e') ae, j' + 1)
                             _           -> (e', j')
-                        (e''', j''') = boxOrUnboxIrLetExpr e' vt vt2 j'
+                        (e''', j''') = boxOrUnboxIrLetExpr e'' vt vt2 j''
                     in  (LvarBind id e''', (j''', cvids'))
                   else
                     let (e', vt2, (j', cvids')) =
@@ -259,8 +259,8 @@ coreExprToIrFunBody' env expr valueTypeMaybe (i, closureVarIds) =
                         (e'', j'') =
                           case e' of
                             LetExpr _ (LamFun [] _) ->
-                              let aa = LetExpr (NodeId (j' + 1) ValueTypeRef) (ArgTuple [])
-                              in  (LetExpr (NodeId j' vt2) (FunApp e' aa), j' + 2)
+                              let aa = LetExpr (NodeId j' ValueTypeRef) (ArgTuple [])
+                              in  (LetExpr (NodeId j' vt2) (FunApp e' aa), j' + 1)
                             _                       -> (e', j')
                         (e''', j''') = boxOrUnboxIrArgExpr e'' vt vt2 j''
                     in  (ClosureVarBind id e''', (j''', cvids'))
@@ -276,7 +276,7 @@ coreExprToIrFunBodyResult' env expr valueTypeMaybe pair =
       let (fun, args, tyVars) = splitCoreApps expr
       in  case fun of
             GHC.Var v | maybe False (\(w, ac) -> v == w && length args == ac) (ie_funPairMaybe env) ->
-              let (args', (i', closureVarIds')) = foldr (
+              let (args', pair') = foldr (
                       \a (as, p) ->
                         case coreExprToIrArgExpr' (setFunFlag env False) a p of
                           (a', vt, p') ->
@@ -286,7 +286,7 @@ coreExprToIrFunBodyResult' env expr valueTypeMaybe pair =
                                     _            -> Unbox a'
                             in  (a'' : as, p')
                     ) ([], pair) args
-              in  (Retry args', maybe ValueTypeRef id valueTypeMaybe, (i' + 1, closureVarIds'))
+              in  (Retry args', maybe ValueTypeRef id valueTypeMaybe, pair')
             _         ->
               case valueTypeMaybe of
                 Just vt ->
@@ -508,7 +508,7 @@ coreCaseToIrLetExpr' env expr pair =
                         GHC.DataAlt dc ->
                           let b =
                                 case GHC.dataConSig dc of
-                                  (_, _, [t], _) -> length as == 1
+                                  (_, _, [_], _) -> length as == 1
                                   _              -> False
                           in  if not b then
                                 if not (GHC.isEnumerationTyCon (GHC.dataConTyCon dc)) then
