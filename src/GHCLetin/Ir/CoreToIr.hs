@@ -245,7 +245,7 @@ coreExprToIrFunBody' env expr valueTypeMaybe (i, closureVarIds) =
                         (e'', j'') =
                           case e' of
                             LamFun [] _ ->
-                              let aa = LetExpr (NodeId (j' + 1) ValueTypeRef) (ArgArray [])
+                              let aa = LetExpr (NodeId (j' + 1) ValueTypeRef) (ArgTuple [])
                               in  (FunApp (LetExpr (NodeId j' vt2) e') aa, j' + 2)
                             _           -> (e', j')
                         (e''', j''') = boxOrUnboxIrLetExpr e' vt vt2 j'
@@ -259,7 +259,7 @@ coreExprToIrFunBody' env expr valueTypeMaybe (i, closureVarIds) =
                         (e'', j'') =
                           case e' of
                             LetExpr _ (LamFun [] _) ->
-                              let aa = LetExpr (NodeId (j' + 1) ValueTypeRef) (ArgArray [])
+                              let aa = LetExpr (NodeId (j' + 1) ValueTypeRef) (ArgTuple [])
                               in  (LetExpr (NodeId j' vt2) (FunApp e' aa), j' + 2)
                             _                       -> (e', j')
                         (e''', j''') = boxOrUnboxIrArgExpr e'' vt vt2 j''
@@ -396,7 +396,7 @@ varToIrLocalVarFunOrFunApp' env var info pair =
   else
     case varToIrLocalVarFun' env var info pair of
       (e, vt, p @ (i', cvids')) ->
-        (FunApp (LetExpr (NodeId (i' + 1) ValueTypeRef) e) (LetExpr (NodeId i' ValueTypeRef) (ArgArray [])), ValueTypeRef, (i' + 2, cvids'))
+        (FunApp (LetExpr (NodeId (i' + 1) ValueTypeRef) e) (LetExpr (NodeId i' ValueTypeRef) (ArgTuple [])), ValueTypeRef, (i' + 2, cvids'))
 
 varToIrLocalVarFun' :: IrEnv -> GHC.Var -> IrLocalVarInfo -> (Int, UniqSet LocalVarId) -> (LetExpr, ValueType, (Int, UniqSet LocalVarId))
 varToIrLocalVarFun' env var info pair =
@@ -461,7 +461,7 @@ coreAppToIrLetExpr' env expr pair =
                                 ValueTypeRef   -> (a', j')
                         in  (a'' : as, (j'', cvids'))
                 ) ([], pair) ((fun, True) : (zip args (replicate (length args) False)))
-              argArray' = LetExpr (NodeId i' ValueTypeRef) (ArgArray args')
+              argArray' = LetExpr (NodeId i' ValueTypeRef) (ArgTuple args')
           in  (FunApp fun' argArray', ValueTypeRef, (i' + 1, closureVarIds'))
 
 coreCaseToIrLetSimpleCase'_maybe :: IrEnv -> GHC.CoreExpr -> (Int, UniqSet LocalVarId) -> Maybe (LetExpr, ValueType, (Int, UniqSet LocalVarId))
@@ -870,7 +870,7 @@ irLetExprCount expr =
     LetFunApp fb      -> irFunBodyCount fb + 1
     LamFun _ fb       -> irFunBodyCount fb + 1
     CaseFunApp e as   -> foldr (\a s -> irAltCount a + s) 0 as + 1
-    ArgArray es       -> foldr (\e s -> irArgExprCount e + s) 0 es + 1
+    ArgTuple es       -> foldr (\e s -> irArgExprCount e + s) 0 es + 1
     ArgExpr e         -> irArgExprCount e + 1
     LetIf e e1 e2     -> irArgExprCount e + irLetExprCount e1 + irLetExprCount e2 + 1
 

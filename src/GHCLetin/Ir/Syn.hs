@@ -49,7 +49,7 @@ data LetExpr =
   | LetFunApp FunBody
   | LamFun [LocalVarId] FunBody
   | CaseFunApp ArgExpr [(AltCon, (LocalVarId, [LocalVarId], FunBody))]
-  | ArgArray [ArgExpr]
+  | ArgTuple [ArgExpr]
   | ArgExpr ArgExpr
   | LetIf ArgExpr LetExpr LetExpr
 
